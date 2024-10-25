@@ -3,6 +3,9 @@ from pathlib import Path
 import PIL
 import pandas as pd
 from collections import Counter
+import zipfile
+import os
+import logging
 
 # External packages
 import streamlit as st
@@ -55,18 +58,12 @@ def plot_boxes(image, boxes, class_names, selected_class=None):
         32: (240, 200, 255),
         33: (200, 200, 220)
     }
-
     for box in boxes:
         cls = int(box.cls[0])
-        class_name = class_names.get(cls, "Unknown")
-        
-        if selected_class and class_name != selected_class:
-            continue  # Skip boxes that don't match the selected class
-
         x1, y1, x2, y2 = box.xyxy[0]
         x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
         
-        label = ' '.join(class_name.split()[:2])
+        label = str(cls)  # Display class number instead of name
 
         color = color_map.get(cls, (255, 255, 255))
         cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
@@ -93,18 +90,18 @@ st.set_page_config(
 # Main page heading
 st.title("Service Key Detection")
 
+# Centered container for settings and upload
+with st.container():
+    col1, col2, col3 = st.columns([1, 2, 1])
 
+    with col2:
+        # Additional Settings
+        confidence = float(st.slider(
+            "Select Model Confidence (%)", 25, 100, 40, key="confidence_slider")) / 100
 
-# Additional Settings Dropdown
-with st.sidebar.expander("Additional Settings"):
-    confidence = float(st.slider(
-        "Select Model Confidence (%)", 25, 100, 40)) / 100
-
-st.sidebar.header("Upload Image")
-
-# Image Upload
-source_img = st.sidebar.file_uploader(
-    "Choose an image...", type=("jpg", "jpeg", "png", 'bmp', 'webp'))
+        # Image Upload for Multiple Images
+        uploaded_images = st.file_uploader(
+            "Choose images...", type=("jpg", "jpeg", "png", 'bmp', 'webp'), accept_multiple_files=True, key="image_uploader")
 
 # Set model path to Detection model only
 model_path = Path(settings.DETECTION_MODEL)
@@ -119,104 +116,107 @@ except Exception as ex:
 
 # Initialize session state for detections
 if 'detections' not in st.session_state:
-    st.session_state['detections'] = None
-    st.session_state['cls_names'] = []
-    st.session_state['image_np'] = None
+    st.session_state['detections'] = []
+    st.session_state['detection_summary'] = pd.DataFrame()
 
-# Layout for Original and Detected Images
-col1, col2 = st.columns(2)
+# Create a temporary directory to store annotated images and CSV files
+output_dir = "annotated_outputs"
+os.makedirs(output_dir, exist_ok=True)
 
-with col1:
-    st.subheader("Original Image")
-    try:
-        if source_img is None:
-            default_image_path = str(settings.DEFAULT_IMAGE)
-            default_image = PIL.Image.open(default_image_path).convert("RGB")
-            st.image(default_image, caption="Default Image", use_column_width=True)
-        else:
-            uploaded_image = PIL.Image.open(source_img).convert("RGB")
-            st.image(uploaded_image, caption="Uploaded Image", use_column_width=True)
-    except Exception as ex:
-        st.error("Error occurred while opening the image.")
-        st.error(ex)
+# Process Images
+if st.button('Detect Objects', key="detect_button") and uploaded_images:
+    for uploaded_image in uploaded_images:
+        try:
+            # Open and convert image to OpenCV format
+            image = PIL.Image.open(uploaded_image).convert("RGB")
+            image_np = np.array(image)
+            image_np = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
 
-with col2:
-    st.subheader("Detected Image")
-    try:
-        if source_img is None:
-            default_detected_image_path = str(settings.DEFAULT_DETECT_IMAGE)
-            default_detected_image = PIL.Image.open(default_detected_image_path).convert("RGB")
-            st.image(default_detected_image, caption='Detected Image', use_column_width=True)
-        else:
-            if st.sidebar.button('Detect Objects'):
-                res = model.predict(uploaded_image, conf=confidence)
-                boxes = res[0].boxes
+            # Perform object detection
+            res = model.predict(image, conf=confidence)
+            boxes = res[0].boxes
+
+            # Store detections if any boxes are found
+            if boxes:
+                st.session_state['detections'] = boxes
+
+                # Draw bounding boxes on the image
+                image_np_drawn = plot_boxes(image_np.copy(), boxes, model.names)
+
+                # Convert back to RGB for saving
+                image_np_drawn = cv2.cvtColor(image_np_drawn, cv2.COLOR_BGR2RGB)
                 
-                if not boxes:
-                    st.warning("No objects detected.")
-                    st.session_state['detections'] = None
-                    st.session_state['cls_names'] = []
-                    st.session_state['image_np'] = None
-                else:
-                    # Convert PIL Image to OpenCV format (numpy array)
-                    image_np = np.array(uploaded_image)
-                    image_np = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)  # Convert RGB to BGR for OpenCV
-                    
-                    # Store detections in session state
-                    st.session_state['detections'] = boxes
-                    st.session_state['cls_names'] = [model.names[int(box.cls[0])] for box in boxes]
-                    st.session_state['image_np'] = image_np.copy()
-                    
-                    # Draw all bounding boxes initially
-                    image_np_drawn = plot_boxes(image_np.copy(), boxes, model.names)
-                    
-                    # Convert back to RGB for displaying in Streamlit
-                    image_np_drawn = cv2.cvtColor(image_np_drawn, cv2.COLOR_BGR2RGB)
-                    
-                    # Display the processed image
-                    st.image(image_np_drawn, caption='Detected Image', use_column_width=True)
-                    
-                    # Create a table of classes and their quantities
-                    cls_counts = Counter(st.session_state['cls_names'])
-                    
-                    df = pd.DataFrame(cls_counts.items(), columns=['Class', 'Quantity'])
-                    total_quantity = df['Quantity'].sum()
-                    
-                    # Append total row
-                    total_row = pd.DataFrame([{'Class': 'Total', 'Quantity': total_quantity}])
-                    df = pd.concat([df, total_row], ignore_index=True)
-                    
-                    st.subheader("Detection Summary")
-                    st.table(df)
-    except Exception as ex:
-        st.error("Error occurred during object detection.")
-        st.error(ex)
+                # Save the annotated image
+                output_image_path = os.path.join(output_dir, f"{uploaded_image.name.split('.')[0]}_annotated.png")
+                PIL.Image.fromarray(image_np_drawn).save(output_image_path)
 
-# Interactive Filtering
-if st.session_state['detections']:
-    st.subheader("Filter Detections by Class")
-    unique_classes = sorted(list(set(st.session_state['cls_names'])))
-    selected_class = st.selectbox("Select a class to filter", ["All"] + unique_classes)
+                # Create a table of classes, numbers, and their quantities
+                cls_counts = Counter([int(box.cls[0]) for box in boxes])
+                cls_data = [
+                    {"Class Label": model.names[cls], "Class Number": cls, "Quantity": count}
+                    for cls, count in cls_counts.items()
+                ]
+                total_quantity = sum([item['Quantity'] for item in cls_data])
+                cls_data.append({"Class Label": "Total", "Class Number": "", "Quantity": total_quantity})
 
-    # Retrieve stored image and detections
-    image_np_filtered = st.session_state['image_np'].copy()
-    boxes = st.session_state['detections']
-    class_names = model.names
+                # Convert to DataFrame
+                df = pd.DataFrame(cls_data)
 
-    if selected_class != "All":
-        # Filter boxes for the selected class
-        filtered_boxes = [box for box, cls in zip(boxes, st.session_state['cls_names']) if cls == selected_class]
-    else:
-        # No filtering
-        filtered_boxes = boxes
+                # Save detection summary as a CSV file
+                csv_path = os.path.join(output_dir, f"{uploaded_image.name.split('.')[0]}_detection_summary.csv")
+                df.to_csv(csv_path, index=False)
 
-    if filtered_boxes:
-        # Draw filtered bounding boxes
-        image_np_filtered = plot_boxes(image_np_filtered.copy(), filtered_boxes, class_names, selected_class if selected_class != "All" else None)
-        
-        # Convert back to RGB for displaying in Streamlit
-        image_np_filtered = cv2.cvtColor(image_np_filtered, cv2.COLOR_BGR2RGB)
-        
-        st.image(image_np_filtered, caption=f'Detected Image - {"All Classes" if selected_class == "All" else selected_class}', use_column_width=True)
-    else:
-        st.warning(f"No detections found for class: {selected_class}")
+                # Store the detection summary using pd.concat for further calculations
+                st.session_state['detection_summary'] = pd.concat([st.session_state['detection_summary'], df], ignore_index=True)
+
+        except Exception as ex:
+            logging.error(f"Error processing image {uploaded_image.name}: {ex}")
+
+    # Create a ZIP file of all annotated images and CSV files
+    zip_filename = "annotated_images_and_summaries.zip"
+    zip_path = os.path.join(output_dir, zip_filename)
+    with zipfile.ZipFile(zip_path, 'w') as zipf:
+        for root, _, files in os.walk(output_dir):
+            for file in files:
+                if file.endswith(".png") or file.endswith(".csv"):
+                    zipf.write(os.path.join(root, file), arcname=file)
+
+# Dropdown to select the label for calculation
+if not st.session_state['detection_summary'].empty:
+    selected_label = st.selectbox(
+        "Select a class label to calculate price",
+        st.session_state['detection_summary']['Class Label'].unique()
+    )
+
+    # Display the total count for the selected class
+    selected_class_count = st.session_state['detection_summary'][
+        st.session_state['detection_summary']['Class Label'] == selected_label
+    ]['Quantity'].sum()
+
+    st.write(f"Total count for {selected_label}: {selected_class_count}")
+
+    # Input for unit price
+    unit_price = st.number_input("Enter unit price:", min_value=0.0, value=0.0)
+
+    # Calculate total price
+    if st.button("Calculate Total Price", key="calculate_button"):
+        total_price = selected_class_count * unit_price
+        st.write(f"Total price for {selected_label}: {total_price}")
+
+# Offer the ZIP file for download if it exists
+if 'zip_path' in locals() and os.path.exists(zip_path):
+    with open(zip_path, "rb") as f:
+        st.download_button(
+            label="Download Annotated Images and CSVs",
+            data=f,
+            file_name=zip_filename,
+            mime="application/zip"
+        )
+
+# Clean up temporary files after download
+if os.path.exists(output_dir):
+    for root, dirs, files in os.walk(output_dir, topdown=False):
+        for file in files:
+            os.remove(os.path.join(root, file))
+        for dir in dirs:
+            os.rmdir(os.path.join(root, dir))
