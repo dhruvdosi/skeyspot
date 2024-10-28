@@ -88,7 +88,7 @@ st.set_page_config(
 )
 
 # Main page heading
-st.title("Service Key Detection")
+st.markdown("<h1 style='text-align: center;'>Service Key Detection</h1>", unsafe_allow_html=True)
 
 # Centered container for settings and upload
 with st.container():
@@ -123,95 +123,102 @@ if 'detections' not in st.session_state:
 output_dir = "annotated_outputs"
 os.makedirs(output_dir, exist_ok=True)
 
-# Process Images
-if st.button('Detect Objects', key="detect_button") and uploaded_images:
-    for uploaded_image in uploaded_images:
-        try:
-            # Open and convert image to OpenCV format
-            image = PIL.Image.open(uploaded_image).convert("RGB")
-            image_np = np.array(image)
-            image_np = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+col1, col2, col3 = st.columns([1, 2, 1])
+with col2:
+    if st.button('Detect Objects', key="detect_button") and uploaded_images:
 
-            # Perform object detection
-            res = model.predict(image, conf=confidence)
-            boxes = res[0].boxes
+        for uploaded_image in uploaded_images:
+            try:
+                # Open and convert image to OpenCV format
+                image = PIL.Image.open(uploaded_image).convert("RGB")
+                image_np = np.array(image)
+                image_np = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
 
-            # Store detections if any boxes are found
-            if boxes:
-                st.session_state['detections'] = boxes
+                # Perform object detection
+                res = model.predict(image, conf=confidence)
+                boxes = res[0].boxes
 
-                # Draw bounding boxes on the image
-                image_np_drawn = plot_boxes(image_np.copy(), boxes, model.names)
+                # Store detections if any boxes are found
+                if boxes:
+                    st.session_state['detections'] = boxes
 
-                # Convert back to RGB for saving
-                image_np_drawn = cv2.cvtColor(image_np_drawn, cv2.COLOR_BGR2RGB)
-                
-                # Save the annotated image
-                output_image_path = os.path.join(output_dir, f"{uploaded_image.name.split('.')[0]}_annotated.png")
-                PIL.Image.fromarray(image_np_drawn).save(output_image_path)
+                    # Draw bounding boxes on the image
+                    image_np_drawn = plot_boxes(image_np.copy(), boxes, model.names)
 
-                # Create a table of classes, numbers, and their quantities
-                cls_counts = Counter([int(box.cls[0]) for box in boxes])
-                cls_data = [
-                    {"Class Label": model.names[cls], "Class Number": cls, "Quantity": count}
-                    for cls, count in cls_counts.items()
-                ]
-                total_quantity = sum([item['Quantity'] for item in cls_data])
-                cls_data.append({"Class Label": "Total", "Class Number": "", "Quantity": total_quantity})
+                    # Convert back to RGB for saving
+                    image_np_drawn = cv2.cvtColor(image_np_drawn, cv2.COLOR_BGR2RGB)
+                    
+                    # Save the annotated image
+                    output_image_path = os.path.join(output_dir, f"{uploaded_image.name.split('.')[0]}_annotated.png")
+                    PIL.Image.fromarray(image_np_drawn).save(output_image_path)
 
-                # Convert to DataFrame
-                df = pd.DataFrame(cls_data)
+                    # Create a table of classes, numbers, and their quantities
+                    cls_counts = Counter([int(box.cls[0]) for box in boxes])
+                    cls_data = [
+                        {"Class Label": model.names[cls], "Class Number": cls, "Quantity": count}
+                        for cls, count in cls_counts.items()
+                    ]
+                    total_quantity = sum([item['Quantity'] for item in cls_data])
+                    cls_data.append({"Class Label": "Total", "Class Number": "", "Quantity": total_quantity})
 
-                # Save detection summary as a CSV file
-                csv_path = os.path.join(output_dir, f"{uploaded_image.name.split('.')[0]}_detection_summary.csv")
-                df.to_csv(csv_path, index=False)
+                    # Convert to DataFrame
+                    df = pd.DataFrame(cls_data)
 
-                # Store the detection summary using pd.concat for further calculations
-                st.session_state['detection_summary'] = pd.concat([st.session_state['detection_summary'], df], ignore_index=True)
+                    # Save detection summary as a CSV file
+                    csv_path = os.path.join(output_dir, f"{uploaded_image.name.split('.')[0]}_detection_summary.csv")
+                    df.to_csv(csv_path, index=False)
 
-        except Exception as ex:
-            logging.error(f"Error processing image {uploaded_image.name}: {ex}")
+                    # Store the detection summary using pd.concat for further calculations
+                    st.session_state['detection_summary'] = pd.concat([st.session_state['detection_summary'], df], ignore_index=True)
 
-    # Create a ZIP file of all annotated images and CSV files
-    zip_filename = "annotated_images_and_summaries.zip"
-    zip_path = os.path.join(output_dir, zip_filename)
-    with zipfile.ZipFile(zip_path, 'w') as zipf:
-        for root, _, files in os.walk(output_dir):
-            for file in files:
-                if file.endswith(".png") or file.endswith(".csv"):
-                    zipf.write(os.path.join(root, file), arcname=file)
+            except Exception as ex:
+                logging.error(f"Error processing image {uploaded_image.name}: {ex}")
+
+        # Create a ZIP file of all annotated images and CSV files
+        zip_filename = "annotated_images_and_summaries.zip"
+        zip_path = os.path.join(output_dir, zip_filename)
+        with zipfile.ZipFile(zip_path, 'w') as zipf:
+            for root, _, files in os.walk(output_dir):
+                for file in files:
+                    if file.endswith(".png") or file.endswith(".csv"):
+                        zipf.write(os.path.join(root, file), arcname=file)
 
 # Dropdown to select the label for calculation
-if not st.session_state['detection_summary'].empty:
-    selected_label = st.selectbox(
-        "Select a class label to calculate price",
-        st.session_state['detection_summary']['Class Label'].unique()
-    )
-
-    # Display the total count for the selected class
-    selected_class_count = st.session_state['detection_summary'][
-        st.session_state['detection_summary']['Class Label'] == selected_label
-    ]['Quantity'].sum()
-
-    st.write(f"Total count for {selected_label}: {selected_class_count}")
-
-    # Input for unit price
-    unit_price = st.number_input("Enter unit price:", min_value=0.0, value=0.0)
-
-    # Calculate total price
-    if st.button("Calculate Total Price", key="calculate_button"):
-        total_price = selected_class_count * unit_price
-        st.write(f"Total price for {selected_label}: {total_price}")
-
-# Offer the ZIP file for download if it exists
-if 'zip_path' in locals() and os.path.exists(zip_path):
-    with open(zip_path, "rb") as f:
-        st.download_button(
-            label="Download Annotated Images and CSVs",
-            data=f,
-            file_name=zip_filename,
-            mime="application/zip"
+# Centered dropdown for choosing a label
+col1, col2, col3 = st.columns([1, 2, 1])
+with col2:
+    if not st.session_state['detection_summary'].empty:
+        selected_label = st.selectbox(
+            "Select a class label to calculate price",
+            st.session_state['detection_summary']['Class Label'].unique()
         )
+
+        # Display the total count for the selected class
+        selected_class_count = st.session_state['detection_summary'][
+            st.session_state['detection_summary']['Class Label'] == selected_label
+        ]['Quantity'].sum()
+        
+        st.write(f"Total count for {selected_label}: {selected_class_count}")
+
+        # Centered unit price input
+        unit_price = st.number_input("Enter unit price:", min_value=0.0, value=0.0)
+
+        # Centered "Calculate Total Price" button and total price output
+        if st.button("Calculate Total Price", key="calculate_button"):
+            total_price = selected_class_count * unit_price
+            st.write(f"Total price for {selected_label}: {total_price}")
+
+# Centered download button
+col4, col5, col6 = st.columns([1, 2, 1])
+with col5:
+    if 'zip_path' in locals() and os.path.exists(zip_path):
+        with open(zip_path, "rb") as f:
+            st.download_button(
+                label="Download Annotated Images and CSVs",
+                data=f,
+                file_name=zip_filename,
+                mime="application/zip"
+            )
 
 # Clean up temporary files after download
 if os.path.exists(output_dir):
